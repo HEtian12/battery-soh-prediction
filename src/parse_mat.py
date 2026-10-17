@@ -11,7 +11,10 @@ def _array(value: Any) -> np.ndarray:
     """Convert a MATLAB value to a flat numeric array."""
     if value is None:
         return np.array([], dtype=float)
-    return np.asarray(value, dtype=float).reshape(-1)
+    arr = np.asarray(value)
+    if np.iscomplexobj(arr):
+        arr = arr.real  # 复阻抗取实部（电阻）
+    return np.asarray(arr, dtype=float).reshape(-1)
 
 
 def _text(value: Any) -> str:
@@ -70,5 +73,7 @@ def load_battery_mat(path: str | Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.D
 
 
 def parse_all_cells(raw_dir: str | Path) -> dict[str, tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]]:
-    """Parse every available B0005/B0006/B0007/B0018 file."""
-    return {cell: load_battery_mat(Path(raw_dir) / f"{cell}.mat") for cell in ("B0005", "B0006", "B0007", "B0018") if (Path(raw_dir) / f"{cell}.mat").exists()}
+    """Parse every B*.mat file under raw_dir (supports the full NASA battery set)."""
+    raw = Path(raw_dir)
+    files = sorted(raw.glob("B*.mat"))
+    return {f.stem: load_battery_mat(f) for f in files}

@@ -21,8 +21,18 @@ def add_dqdv_features(features: pd.DataFrame, samples: pd.DataFrame, window: int
     for cycle_index, grp in samples.groupby("cycle_index"):
         t = grp.time.values
         V = grp.voltage.values
-        # 电流恒定 2A，容量 Q = I * t（转成 Ah）
-        Q = 2.0 * (t - t[0]) / 3600.0
+        # 对齐长度并跳过样本过少的循环（部分电芯 Time/Voltage 长度不一致）
+        n = min(len(t), len(V))
+        if n < 4:
+            rows.append({"cycle_index": cycle_index, "dqdv_peak_height": np.nan, "dqdv_peak_voltage": np.nan})
+            continue
+        t, V = t[:n], V[:n]
+        # 电流从 Current_measured 读（不同队列放电电流不同），缺省回退 2A
+        cur = grp["current"].values if "current" in grp.columns else np.array([2.0])
+        I = float(np.nanmean(np.abs(cur))) if len(cur) else 2.0
+        if not np.isfinite(I) or I < 0.1:
+            I = 2.0
+        Q = I * (t - t[0]) / 3600.0  # 容量 = 电流 × 时间，转 Ah
         # 滤波：滑动平均，去掉测量毛刺（否则微分会爆炸）
         Vs = np.convolve(V, np.ones(window) / window, mode="same")
         dV = np.diff(Vs)

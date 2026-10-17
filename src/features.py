@@ -24,8 +24,8 @@ def extract_cycle_features(cycle_data: dict) -> dict:
     middle = (time >= time[0] + .25 * duration) & (time <= time[0] + .75 * duration)
     slope = float(np.polyfit(time[middle], voltage[middle], 1)[0]) if middle.sum() >= 2 else np.nan
     temp = temperature[np.isfinite(temperature)] if len(temperature) else np.array([np.nan])
-    cutoff = time[voltage <= 2.5]
-    return {"time_to_cutoff": float(cutoff[0] - time[0]) if len(cutoff) else duration, "voltage_at_t_25pct": sample(.25), "voltage_at_t_50pct": sample(.5), "voltage_at_t_75pct": sample(.75), "mean_voltage": float(voltage.mean()), "min_voltage": float(voltage.min()), "voltage_curve_auc": float(trapezoid(voltage, time)), "voltage_plateau_slope": slope, "max_temperature": float(np.nanmax(temp)), "temperature_rise": float(np.nanmax(temp) - temp[0]), "mean_temperature": float(np.nanmean(temp))}
+    cutoff_idx = int(np.argmin(voltage))  # 自适应截止：最低电压点即放电结束（不同队列截止电压不同）
+    return {"time_to_cutoff": float(time[cutoff_idx] - time[0]) if cutoff_idx < len(time) else duration, "voltage_at_t_25pct": sample(.25), "voltage_at_t_50pct": sample(.5), "voltage_at_t_75pct": sample(.75), "mean_voltage": float(voltage.mean()), "min_voltage": float(voltage.min()), "voltage_curve_auc": float(trapezoid(voltage, time)), "voltage_plateau_slope": slope, "max_temperature": float(np.nanmax(temp)), "temperature_rise": float(np.nanmax(temp) - temp[0]), "mean_temperature": float(np.nanmean(temp))}
 
 
 def build_features(cycles: pd.DataFrame, series: pd.DataFrame, impedance: pd.DataFrame, rated_capacity: float = 2.0) -> pd.DataFrame:
