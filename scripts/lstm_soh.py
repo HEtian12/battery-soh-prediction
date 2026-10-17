@@ -1,4 +1,4 @@
-"""LSTM 时序模型预测 SOH（需 torch）。放电 V/I/T 序列 -> SOH。"""
+"""LSTM 时序预测 SOH：过去 K 个循环 SOH -> 下一个（含目标归一化 + 基线对照）。"""
 import sys
 from pathlib import Path
 
@@ -7,51 +7,54 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
 
-from src.parse_mat import load_battery_mat
+from src.parse_mat import parse_all_cells
 from src.features import build_features
-from src.split import chronological_split
 
 SEED = 42
-SEQ_LEN = 128
+K = 20
 torch.manual_seed(SEED)
 np.random.seed(SEED)
 
 DATA = Path(__file__).resolve().parents[1] / "data" / "raw"
-d, s, i = load_battery_mat(DATA / "B0018.mat")
-f = build_features(d, s, i)
-train, test = chronological_split(f)
+parsed = parse_all_cells(DATA)
 
-
-def cycle_to_seq(grp, seq_len=SEQ_LEN):
-    V = grp.voltage.values.astype(float)
-    I = grp.current.values.astype(float)
-    T = grp.temperature.values.astype(float)
-    idx = np.linspace(0, len(V) - 1, seq_len).astype(int)
-    return np.stack([V[idx], I[idx], T[idx]], axis=1)  # (seq_len, 3)
-
-
-def build(samples, features):
-    xs, ys = [], []
-    for cyc, soh in zip(features.cycle_index, features.soh):
-        grp = samples[samples.cycle_index == cyc]
-        if len(grp) < 4:
+xs_tr, ys_tr, xs_te, ys_te = [], [], [], []
+for cell, (cycles, series, impedance) in parsed.items():
+    try:
+        f = build_features(cycles, series, impedance)
+        if f["capacity"].max() > 2.2 or len(f) < 10:
             continue
-        xs.append(cycle_to_seq(grp))
-        ys.append(soh)
-    return np.stack(xs), np.array(ys)
+        soh = f.sort_values("cycle_index").soh.values.astype(float)
+        n = len(soh)
+        cut = int(n * 0.8)
+        for i in range(K, n):
+            x, y = soh[i - K:i], soh[i]
+            (xs_tr.append(x), ys_tr.append(y)) if i < cut else (xs_te.append(x), ys_te.append(y))
+    except Exception:
+        continue
 
+Xtr, ytr = np.array(xs_tr), np.array(ys_tr)
+Xte, yte = np.array(xs_te), np.array(ys_te)
 
-Xtr, ytr = build(s, train)
-Xte, yte = build(s, test)
-print(f"训练序列 {Xtr.shape}，测试序列 {Xte.shape}")
+# 基线：持久性预测（下一个 = 最后一个）
+persist_pred = Xte[:, -1]
+persist_rmse = float(np.sqrt(np.mean((persist_pred - yte) ** 2)))
+persist_r2 = 1 - float(np.sum((yte - persist_pred) ** 2) / np.sum((yte - yte.mean()) ** 2))
+print(f"持久性基线(下个=上个): RMSE={persist_rmse:.3f}%  R2={persist_r2:.4f}")
+
+# 归一化输入 + 目标（用训练集统计量）
+x_mu, x_sd = Xtr.mean(), Xtr.std() + 1e-8
+y_mu, y_sd = ytr.mean(), ytr.std() + 1e-8
+Xtr_t = torch.tensor((Xtr - x_mu) / x_sd, dtype=torch.float32).unsqueeze(-1)
+ytr_t = torch.tensor((ytr - y_mu) / y_sd, dtype=torch.float32)
+Xte_t = torch.tensor((Xte - x_mu) / x_sd, dtype=torch.float32).unsqueeze(-1)
 
 
 class SOHLSTM(nn.Module):
-    def __init__(self, in_dim=3, hidden=64, layers=1):
+    def __init__(self, hidden=32):
         super().__init__()
-        self.lstm = nn.LSTM(in_dim, hidden, layers, batch_first=True)
+        self.lstm = nn.LSTM(1, hidden, 1, batch_first=True)
         self.fc = nn.Linear(hidden, 1)
 
     def forward(self, x):
@@ -60,25 +63,22 @@ class SOHLSTM(nn.Module):
 
 
 model = SOHLSTM()
-opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+opt = torch.optim.Adam(model.parameters(), lr=1e-2)
 loss_fn = nn.MSELoss()
 
-Xtr_t = torch.tensor(Xtr, dtype=torch.float32)
-ytr_t = torch.tensor(ytr, dtype=torch.float32)
-Xte_t = torch.tensor(Xte, dtype=torch.float32)
-
-model.train()
-for epoch in range(80):
+for epoch in range(300):
     opt.zero_grad()
-    pred = model(Xtr_t)
-    loss = loss_fn(pred, ytr_t)
+    loss = loss_fn(model(Xtr_t), ytr_t)
     loss.backward()
     opt.step()
+    if (epoch + 1) % 50 == 0:
+        print(f"epoch {epoch+1}: loss={loss.item():.4f}")
 
 model.eval()
 with torch.no_grad():
-    pred = model(Xte_t).numpy()
+    pred_n = model(Xte_t).numpy()
+pred = pred_n * y_sd + y_mu
 rmse = float(np.sqrt(np.mean((pred - yte) ** 2)))
 mae = float(np.mean(np.abs(pred - yte)))
-ss = 1 - float(np.sum((yte - pred) ** 2) / np.sum((yte - yte.mean()) ** 2))
-print(f"LSTM SOH: RMSE={rmse:.4f}%  MAE={mae:.4f}%  R2={ss:.4f}")
+r2 = 1 - float(np.sum((yte - pred) ** 2) / np.sum((yte - yte.mean()) ** 2))
+print(f"LSTM SOH: RMSE={rmse:.4f}%  MAE={mae:.4f}%  R2={r2:.4f}")
