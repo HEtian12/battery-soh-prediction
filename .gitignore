@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# 数据（NASA .mat 与导出 CSV 不入库）
+data/raw/*.mat
+data/processed/*.csv
+
+# 报告与图表产物
+report/figures/*.png
+data_quality_log.md
+
+# 环境与缓存
+.pylibs/
+.pip-tmp/
+*.log
+.DS_Store
